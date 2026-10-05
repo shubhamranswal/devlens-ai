@@ -83,7 +83,7 @@ export default function Header({
           </button>
 
           <a
-            href="https://github.com/shubhamranswal/devlens"
+            href="https://github.com/shubhamranswal/devlens-ai"
             target="_blank"
             rel="noreferrer"
             className="p-1.5 rounded border border-neutral-200 dark:border-[#30363d] hover:bg-neutral-100 dark:hover:bg-[#21262d] text-neutral-600 dark:text-[#8b949e] hover:text-neutral-900 dark:hover:text-[#f0f6fc] transition-colors"

@@ -28,13 +28,25 @@ export default function RepoInput({ onAnalyze, isLoading, error }) {
     <div className="max-w-3xl mx-auto py-12 px-4 space-y-8">
       {/* Hero Badge & Title */}
       <div className="text-center space-y-3">
+        <div className="flex justify-center">
+          <img 
+            src="/icon_no_bg.png" 
+            alt="DevLens" 
+            className="w-12 h-12 object-contain"
+            onError={(e) => {
+              e.target.onerror = null;
+              e.target.src = '/icon.png';
+            }}
+          />
+        </div>
+
         <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded bg-neutral-100 dark:bg-[#21262d] border border-neutral-200 dark:border-[#30363d] text-xs text-neutral-600 dark:text-[#8b949e]">
           <Terminal className="w-3.5 h-3.5" />
           <span>DevLens Codebase Intelligence Engine</span>
         </div>
 
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-neutral-900 dark:text-[#f0f6fc]">
-          Inspect repository structure & architecture
+          Inspect repository structure and architecture
         </h1>
 
         <p className="text-xs sm:text-sm text-neutral-600 dark:text-[#8b949e] max-w-xl mx-auto leading-relaxed">
@@ -53,7 +65,7 @@ export default function RepoInput({ onAnalyze, isLoading, error }) {
             type="text"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            placeholder="Paste GitHub URL (e.g. https://github.com/shubhamranswal/devlens)"
+            placeholder="Paste GitHub URL (e.g. https://github.com/shubhamranswal/devlens-ai)"
             disabled={isLoading}
             className="flex-1 bg-transparent px-2 py-2 text-xs sm:text-sm text-neutral-900 dark:text-[#f0f6fc] placeholder-neutral-400 dark:placeholder-[#6e7681] focus:outline-none disabled:opacity-50 font-mono"
           />

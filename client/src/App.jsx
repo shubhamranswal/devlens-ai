@@ -232,7 +232,7 @@ export default function App() {
             <span>v1.0.0</span>
             <span>•</span>
             <a
-              href="https://github.com/shubhamranswal/devlens"
+              href="https://github.com/shubhamranswal/devlens-ai"
               target="_blank"
               rel="noreferrer"
               className="text-blue-600 dark:text-[#58a6ff] hover:underline"

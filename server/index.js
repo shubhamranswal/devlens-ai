@@ -38,6 +38,10 @@ app.use((req, res) => {
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`[DevLens AI] Server running on http://localhost:${PORT}`);
-});
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`[DevLens AI] Server running on http://localhost:${PORT}`);
+  });
+}
+
+export default app;
