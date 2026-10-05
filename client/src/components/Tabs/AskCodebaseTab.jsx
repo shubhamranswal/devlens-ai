@@ -74,6 +74,24 @@ function renderInline(text) {
   });
 }
 
+function extractReferencedFiles(text, allFiles = []) {
+  if (!text || !allFiles || allFiles.length === 0) return [];
+  const found = new Set();
+  for (const f of allFiles) {
+    if (text.includes(f)) {
+      found.add(f);
+    }
+  }
+  const backticked = text.match(/`([^`]+)`/g) || [];
+  for (const b of backticked) {
+    const raw = b.replace(/`/g, '').trim();
+    if (allFiles.includes(raw)) {
+      found.add(raw);
+    }
+  }
+  return Array.from(found).slice(0, 10);
+}
+
 const TECHNICAL_PROMPTS = [
   'How are command-line flags and paths parsed?',
   'What directories and files does the scanner ignore?',
@@ -251,11 +269,34 @@ export default function AskCodebaseTab({
                 <div className="w-5 h-5 rounded bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-[#58a6ff] flex items-center justify-center shrink-0 mt-0.5 border border-blue-200 dark:border-blue-900/50">
                   <Bot className="w-3 h-3" />
                 </div>
-                <div className="flex-1 space-y-1">
+                <div className="flex-1 space-y-2">
                   <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-[#6e7681]">
                     Grounded Answer
                   </span>
                   <FormattedAnswer text={item.answer} />
+
+                  {(() => {
+                    const referencedFiles = extractReferencedFiles(item.answer, analysisData?.aiContextReady?.filePaths);
+                    if (!referencedFiles || referencedFiles.length === 0) return null;
+
+                    return (
+                      <div className="pt-3 mt-3 border-t border-neutral-100 dark:border-[#21262d] space-y-1.5">
+                        <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-[#6e7681] block">
+                          Relevant files
+                        </span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {referencedFiles.map((file) => (
+                            <span 
+                              key={file} 
+                              className="font-mono text-[11px] px-2 py-0.5 rounded bg-neutral-100 dark:bg-[#0d1117] text-neutral-800 dark:text-[#79c0ff] border border-neutral-200 dark:border-[#30363d]"
+                            >
+                              {file}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             </div>

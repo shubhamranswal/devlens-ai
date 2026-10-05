@@ -219,23 +219,29 @@ export default function App() {
         )}
       </main>
 
-      {/* Developer Tool Minimal Footer */}
-      <footer className="border-t border-neutral-200 dark:border-[#30363d] bg-white dark:bg-[#161b22] py-4 text-xs text-neutral-500 dark:text-[#8b949e]">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-neutral-800 dark:text-[#f0f6fc]">DevLens AI</span>
-            <span>•</span>
-            <span>Codebase Architecture & Ingestion Engine</span>
+      {/* Minimal Developer Tool Footer */}
+      <footer className="border-t border-neutral-200 dark:border-[#30363d] bg-white dark:bg-[#161b22] py-3 text-xs text-neutral-500 dark:text-[#8b949e]">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-center sm:text-left">
+          <div>
+            <span>DevLens AI · Codebase Architecture & Intelligence · Built by </span>
+            <a
+              href="https://shubham-ranswal.web.app"
+              target="_blank"
+              rel="noreferrer"
+              className="text-neutral-700 dark:text-[#c9d1d9] hover:text-blue-600 dark:hover:text-[#58a6ff] hover:underline"
+            >
+              Shubham Singh Ranswal
+            </a>
           </div>
 
-          <div className="flex items-center gap-4 text-[11px] font-mono">
+          <div className="flex items-center gap-3 text-[11px] font-mono">
             <span>v1.0.0</span>
-            <span>•</span>
+            <span>·</span>
             <a
               href="https://github.com/shubhamranswal/devlens-ai"
               target="_blank"
               rel="noreferrer"
-              className="text-blue-600 dark:text-[#58a6ff] hover:underline"
+              className="hover:underline"
             >
               GitHub Source
             </a>
