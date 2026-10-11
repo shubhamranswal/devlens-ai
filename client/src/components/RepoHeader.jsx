@@ -10,21 +10,26 @@ import {
   Compass, 
   MessageSquare, 
   LayoutDashboard,
-  Shield,
-  Layers
+  Database
 } from 'lucide-react';
 
 export default function RepoHeader({ 
   analysisData, 
+  memoryOverview,
   activeTab, 
   onSelectTab 
 }) {
   const { repository, metrics, projectType, architecture } = analysisData;
+  const counts = memoryOverview?.counts || analysisData?.projectMemory?.counts || {};
+  const isMemoryConnected = Boolean(memoryOverview?.available && memoryOverview?.status === 'connected');
+  const memoryItemCount = isMemoryConnected
+    ? (counts.decisions || 0) + (counts.bugs || 0) + (counts.fixes || 0) + (counts.symbols || 0)
+    : metrics.totalFiles;
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'memory', label: 'Project Memory & Graph', icon: Database, count: memoryItemCount },
     { id: 'architecture', label: 'Architecture', icon: Compass },
-    { id: 'files', label: 'Files', icon: FolderTree, count: metrics.totalFiles },
     { id: 'ask', label: 'Ask Codebase', icon: MessageSquare }
   ];
 
@@ -91,6 +96,32 @@ export default function RepoHeader({
                 {metrics.analysisTimeMs}ms
               </span>
             </div>
+
+            <button
+              type="button"
+              onClick={() => onSelectTab('memory')}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded border transition-colors ${
+                memoryOverview?.status === 'connected'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/50 text-emerald-700 dark:text-[#3fb950]'
+                  : memoryOverview?.status === 'not_configured'
+                    ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/50 text-amber-700 dark:text-amber-400'
+                    : 'bg-neutral-50 dark:bg-[#21262d] border-neutral-200 dark:border-[#30363d] text-neutral-600 dark:text-[#8b949e]'
+              }`}
+              title="Open Neo4j Project Memory"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span className="font-mono font-medium">
+                {memoryOverview?.status === 'connected'
+                  ? `Neo4j Connected · ${counts.symbols ?? 0} symbols`
+                  : memoryOverview?.status === 'not_configured'
+                    ? 'Neo4j Not Configured'
+                    : memoryOverview?.status === 'unavailable'
+                      ? 'Neo4j Unavailable'
+                      : analysisData?.projectMemory?.ingested
+                        ? `Neo4j Active · ${counts.symbols ?? 0} symbols`
+                        : 'Project Memory'}
+              </span>
+            </button>
           </div>
         </div>
 
