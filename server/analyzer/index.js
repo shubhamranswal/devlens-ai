@@ -5,6 +5,7 @@ import { analyzeStructure } from './structureAnalyzer.js';
 import { detectEntryPoints } from './entryPointDetector.js';
 import { mapArchitecture } from './architectureMapper.js';
 import { generateObservations } from './observations.js';
+import { ingestRepositoryAnalysis } from '../memory/ingestion.js';
 
 export async function analyzeRepository(repoUrl, options = {}) {
   const startTime = Date.now();
@@ -23,7 +24,7 @@ export async function analyzeRepository(repoUrl, options = {}) {
 
   const durationMs = Date.now() - startTime;
 
-  return {
+  const analysisResult = {
     repository: scan.repoInfo,
     metrics: {
       totalFiles: scan.totalFiles,
@@ -56,4 +57,24 @@ export async function analyzeRepository(repoUrl, options = {}) {
       sampleReadmeExcerpt: (scan.manifests['README.md'] || scan.manifests['readme.md'] || '').slice(0, 1500)
     }
   };
+
+  // 3. Project Memory Graph Ingestion Phase (graceful & non-blocking on unconfigured Neo4j)
+  if (!options.skipGraphIngestion) {
+    analysisResult.projectMemory = await ingestRepositoryAnalysis(analysisResult, {
+      rawFiles: scan.files,
+      token: options.token,
+      env: options.env,
+      fetchImpl: options.fetchImpl,
+      sourceContents: options.sourceContents,
+      commits: options.commits
+    });
+  } else {
+    analysisResult.projectMemory = {
+      ingested: false,
+      status: 'skipped',
+      reason: 'Graph ingestion skipped by caller option.'
+    };
+  }
+
+  return analysisResult;
 }

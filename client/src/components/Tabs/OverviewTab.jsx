@@ -12,7 +12,8 @@ import {
   Loader2, 
   RefreshCw, 
   BookOpen,
-  ArrowRight
+  ArrowRight,
+  Database
 } from 'lucide-react';
 
 function MarkdownView({ text }) {
@@ -87,29 +88,134 @@ const LANG_COLORS = {
 
 export default function OverviewTab({ 
   analysisData, 
+  memoryOverview,
   summary, 
+  summaryMeta,
   isGeneratingSummary, 
   summaryError, 
   onGenerateSummary,
   onNavigateToTab
 }) {
-  const { techStack, frameworks, architecture, structure, observations } = analysisData;
+  const { techStack, frameworks, architecture, structure, observations, metrics } = analysisData;
+  const counts = memoryOverview?.counts || analysisData?.projectMemory?.counts || {};
+  const memoryStatus = memoryOverview?.status || (analysisData?.projectMemory?.ingested ? 'connected' : 'not_configured');
+  const isMemoryConnected = memoryStatus === 'connected';
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      {/* Main 2-column Content Area */}
-      <div className="lg:col-span-2 space-y-6">
-        {/* 1. AI Architecture Summary Panel */}
+    <div className="space-y-6">
+      {/* Static Code Analysis vs. Persistent Neo4j Graph Memory */}
+      <div className="rounded-lg border border-neutral-200 dark:border-[#30363d] bg-white dark:bg-[#161b22] p-4 sm:p-5">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-3 border-b border-neutral-200 dark:border-[#30363d]">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <Database className="w-4 h-4 text-blue-600 dark:text-[#58a6ff]" />
+              <h2 className="text-sm font-semibold text-neutral-900 dark:text-[#f0f6fc]">
+                Static Code Analysis & Persistent Neo4j Project Memory
+              </h2>
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                isMemoryConnected
+                  ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-[#3fb950] border-emerald-200 dark:border-emerald-900/50'
+                  : memoryStatus === 'not_configured'
+                    ? 'bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-900/50'
+                    : 'bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-400 border-red-200 dark:border-red-900/50'
+              }`}>
+                {isMemoryConnected
+                  ? 'Graph Status: Connected'
+                  : memoryStatus === 'not_configured'
+                    ? 'Graph Status: Not Configured'
+                    : 'Graph Status: Unavailable'}
+              </span>
+            </div>
+            <p className="text-xs text-neutral-500 dark:text-[#8b949e]">
+              Static analysis inspects repository manifests and directory layout per scan; Neo4j Project Memory persists extracted symbols, bugs, fixes, and architectural decisions across sessions.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onNavigateToTab('memory')}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded border border-blue-200 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-950/30 hover:bg-blue-100 dark:hover:bg-blue-950/50 text-blue-700 dark:text-[#58a6ff] transition-colors shrink-0"
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>Open Neo4j Graph Workspace</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="pt-3 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 text-xs">
+          <div className="p-2.5 rounded bg-neutral-50 dark:bg-[#0d1117] border border-neutral-200 dark:border-[#30363d]">
+            <span className="text-[10px] font-mono uppercase text-neutral-400 dark:text-[#6e7681] block">
+              Scanned Files (Static)
+            </span>
+            <span className="text-sm font-bold font-mono text-neutral-900 dark:text-[#f0f6fc]">
+              {metrics?.totalFiles ?? 0}
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-neutral-50 dark:bg-[#0d1117] border border-neutral-200 dark:border-[#30363d]">
+            <span className="text-[10px] font-mono uppercase text-neutral-400 dark:text-[#6e7681] block">
+              Extracted Symbols
+            </span>
+            <span className="text-sm font-bold font-mono text-neutral-900 dark:text-[#f0f6fc]">
+              {isMemoryConnected ? (counts.symbols ?? 0) : '—'}
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-neutral-50 dark:bg-[#0d1117] border border-neutral-200 dark:border-[#30363d]">
+            <span className="text-[10px] font-mono uppercase text-neutral-400 dark:text-[#6e7681] block">
+              Stored Decisions
+            </span>
+            <span className="text-sm font-bold font-mono text-purple-600 dark:text-purple-400">
+              {isMemoryConnected ? (counts.decisions ?? 0) : '—'}
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-neutral-50 dark:bg-[#0d1117] border border-neutral-200 dark:border-[#30363d]">
+            <span className="text-[10px] font-mono uppercase text-neutral-400 dark:text-[#6e7681] block">
+              Recorded Bugs
+            </span>
+            <span className="text-sm font-bold font-mono text-amber-600 dark:text-amber-400">
+              {isMemoryConnected ? (counts.bugs ?? 0) : '—'}
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-neutral-50 dark:bg-[#0d1117] border border-neutral-200 dark:border-[#30363d]">
+            <span className="text-[10px] font-mono uppercase text-neutral-400 dark:text-[#6e7681] block">
+              Verified Fixes
+            </span>
+            <span className="text-sm font-bold font-mono text-emerald-600 dark:text-[#3fb950]">
+              {isMemoryConnected ? (counts.fixes ?? 0) : '—'}
+            </span>
+          </div>
+          <div className="p-2.5 rounded bg-neutral-50 dark:bg-[#0d1117] border border-neutral-200 dark:border-[#30363d]">
+            <span className="text-[10px] font-mono uppercase text-neutral-400 dark:text-[#6e7681] block">
+              Graph Relationships
+            </span>
+            <span className="text-sm font-bold font-mono text-blue-600 dark:text-[#58a6ff]">
+              {isMemoryConnected ? (counts.relationships ?? 0) : '—'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Main 2-column Content Area */}
+        <div className="lg:col-span-2 space-y-6">
+        {/* 1. AI Architecture Summary Panel (Generated Automatically on Repo Analysis) */}
         <div className="rounded-lg border border-neutral-200 dark:border-[#30363d] bg-white dark:bg-[#161b22] p-5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-neutral-200 dark:border-[#30363d]">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Sparkles className="w-4 h-4 text-blue-600 dark:text-[#58a6ff]" />
               <h2 className="text-sm font-semibold text-neutral-900 dark:text-[#f0f6fc]">
                 AI Architectural Summary
               </h2>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-[#21262d] text-neutral-500 dark:text-[#8b949e]">
-                Gemini
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-[#21262d] text-neutral-600 dark:text-[#8b949e] border border-neutral-200 dark:border-[#30363d]">
+                {summaryMeta?.model || 'Gemini'}
               </span>
+              {summaryMeta?.fallbackUsed && (
+                <span
+                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900/50"
+                  title={`Fallback model succeeded on attempt ${summaryMeta.attempts || 2}`}
+                >
+                  Failover ({summaryMeta.attempts || 2} attempts)
+                </span>
+              )}
             </div>
 
             <button
@@ -123,15 +229,15 @@ export default function OverviewTab({
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   <span>Synthesizing...</span>
                 </>
-              ) : summary ? (
+              ) : summaryError ? (
                 <>
                   <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Regenerate</span>
+                  <span>Retry Summary</span>
                 </>
               ) : (
                 <>
-                  <BookOpen className="w-3.5 h-3.5" />
-                  <span>Generate AI Summary</span>
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Regenerate</span>
                 </>
               )}
             </button>
@@ -145,16 +251,27 @@ export default function OverviewTab({
             ) : isGeneratingSummary ? (
               <div className="py-8 flex flex-col items-center justify-center gap-2 text-neutral-500 dark:text-[#8b949e]">
                 <Loader2 className="w-5 h-5 animate-spin text-blue-600 dark:text-[#58a6ff]" />
-                <span className="text-xs">Analyzing repository structure with Google Gemini...</span>
+                <span className="text-xs font-medium">
+                  Automatically synthesizing repository summary from verified manifests & graph evidence...
+                </span>
               </div>
             ) : summaryError ? (
-              <div className="p-3 rounded bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900/50 text-xs text-red-700 dark:text-red-400">
-                <p className="font-semibold">Failed to generate summary</p>
-                <p className="mt-0.5">{summaryError}</p>
+              <div className="p-3.5 rounded bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900/50 text-xs text-red-700 dark:text-red-400 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <p className="font-semibold">Automatic summary generation encountered an issue</p>
+                  <p className="mt-0.5">{summaryError}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={onGenerateSummary}
+                  className="px-3 py-1.5 rounded bg-red-600 hover:bg-red-700 text-white text-xs font-medium shrink-0"
+                >
+                  Retry Summary
+                </button>
               </div>
             ) : (
               <div className="py-6 text-center text-xs text-neutral-500 dark:text-[#8b949e]">
-                <p>Click <strong className="text-neutral-800 dark:text-[#c9d1d9]">Generate AI Summary</strong> to produce an executive evaluation grounded in repository manifests.</p>
+                <p>Preparing repository architectural summary...</p>
               </div>
             )}
           </div>
@@ -211,10 +328,10 @@ export default function OverviewTab({
             </div>
             <button
               type="button"
-              onClick={() => onNavigateToTab('files')}
+              onClick={() => onNavigateToTab('memory')}
               className="text-xs text-blue-600 dark:text-[#58a6ff] hover:underline flex items-center gap-1"
             >
-              <span>View in Explorer</span>
+              <span>Inspect in Graph & File Explorer</span>
               <ArrowRight className="w-3 h-3" />
             </button>
           </div>
@@ -399,6 +516,7 @@ export default function OverviewTab({
             )}
           </div>
         </div>
+      </div>
       </div>
     </div>
   );
