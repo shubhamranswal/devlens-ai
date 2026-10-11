@@ -1,6 +1,7 @@
 /**
  * DevLens AI Provider
- * Connects to Google Gemini with a configurable, bounded multi-model failover chain:
+ * Connects to Google Gemini with configurable, bounded API-key failover
+ * (GEMINI_API_KEY -> GEMINI_API_KEY_2 -> GEMINI_API_KEY_3) and multi-model failover:
  *   1. Primary:   gemini-3.8-flash
  *   2. Secondary: gemini-3.6-flash
  *   3. Tertiary:  gemini-3.5-flash-lite
@@ -22,23 +23,114 @@ export const DEFAULT_GEMINI_MODEL_CHAIN = Object.freeze([
 const NON_TEXT_MODEL_PATTERNS = /(-tts\b|-live\b|-image\b|embedding|transcribe|omni)/i;
 
 /**
- * Redacts API keys and inline `key=...` query parameters from error messages and logs.
+ * Resolves, trims, and deduplicates configured Gemini API keys in priority order:
+ *   1. GEMINI_API_KEY
+ *   2. GEMINI_API_KEY_2
+ *   3. GEMINI_API_KEY_3
+ * Ignores blank values and deduplicates identical keys while preserving order.
+ * Never logs or exposes raw key values in public metadata.
  */
-export function sanitizeGeminiError(message, apiKey = '') {
+export function resolveGeminiApiKeys(options = {}) {
+  const env = options.env || process.env;
+  const rawEntries = [];
+
+  if (Array.isArray(options.apiKeys) && options.apiKeys.length > 0) {
+    options.apiKeys.forEach((k, idx) => {
+      rawEntries.push({
+        slot: idx === 0 ? 'GEMINI_API_KEY' : `GEMINI_API_KEY_${idx + 1}`,
+        key: k
+      });
+    });
+  } else if (options.apiKey !== undefined) {
+    rawEntries.push({ slot: 'GEMINI_API_KEY', key: options.apiKey });
+    if (options.env?.GEMINI_API_KEY_2) {
+      rawEntries.push({ slot: 'GEMINI_API_KEY_2', key: options.env.GEMINI_API_KEY_2 });
+    }
+    if (options.env?.GEMINI_API_KEY_3) {
+      rawEntries.push({ slot: 'GEMINI_API_KEY_3', key: options.env.GEMINI_API_KEY_3 });
+    }
+  } else {
+    rawEntries.push(
+      { slot: 'GEMINI_API_KEY', key: env.GEMINI_API_KEY },
+      { slot: 'GEMINI_API_KEY_2', key: env.GEMINI_API_KEY_2 },
+      { slot: 'GEMINI_API_KEY_3', key: env.GEMINI_API_KEY_3 }
+    );
+  }
+
+  const seenKeys = new Set();
+  const deduplicated = [];
+
+  for (const entry of rawEntries) {
+    const trimmed = typeof entry.key === 'string' ? entry.key.trim() : '';
+    if (!trimmed) continue;
+    if (seenKeys.has(trimmed)) continue;
+    seenKeys.add(trimmed);
+    deduplicated.push({
+      slot: entry.slot,
+      key: trimmed
+    });
+  }
+
+  return deduplicated;
+}
+
+/**
+ * Redacts all configured API keys and inline `key=...` query parameters from error messages and logs.
+ */
+export function sanitizeGeminiError(message, extraKeys = []) {
   if (!message) return 'Unknown Gemini provider error';
   let sanitized = String(message);
 
   // Strip ?key=... or &key=... query parameters
   sanitized = sanitized.replace(/([?&]key=)[^&\s"']+/gi, '$1[REDACTED]');
+  // Strip Google API key patterns (AIza...)
+  sanitized = sanitized.replace(/\bAIza[0-9A-Za-z_-]{16,}\b/g, '[REDACTED]');
 
-  const keysToRedact = [apiKey, process.env.GEMINI_API_KEY].filter(
-    k => typeof k === 'string' && k.trim().length >= 4
-  );
+  const callerKeys = Array.isArray(extraKeys) ? extraKeys : [extraKeys];
+  const envKeys = [
+    process.env.GEMINI_API_KEY,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3
+  ];
+
+  const keysToRedact = [...callerKeys, ...envKeys]
+    .map(k => (typeof k === 'object' && k !== null ? k.key : k))
+    .filter(k => typeof k === 'string' && k.trim().length >= 4);
+
   for (const key of keysToRedact) {
     sanitized = sanitized.split(key.trim()).join('[REDACTED]');
   }
 
   return sanitized;
+}
+
+/**
+ * Parses HTTP `Retry-After` header (seconds or HTTP date) into milliseconds.
+ */
+export function parseRetryAfterMs(headers) {
+  if (!headers) return null;
+  let raw = null;
+  if (typeof headers.get === 'function') {
+    raw = headers.get('retry-after') ?? headers.get('Retry-After');
+  } else if (typeof headers === 'object') {
+    raw = headers['retry-after'] ?? headers['Retry-After'] ?? null;
+  }
+  if (raw === null || raw === undefined || String(raw).trim() === '') {
+    return null;
+  }
+
+  const str = String(raw).trim();
+  const seconds = Number(str);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.round(seconds * 1000);
+  }
+
+  const dateMs = Date.parse(str);
+  if (Number.isFinite(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+
+  return null;
 }
 
 /**
@@ -76,7 +168,8 @@ export function resolveGeminiModelChain(options = {}) {
 
 /**
  * Classifies an error from a Gemini model call to determine whether to fail over
- * to the next model in the chain or abort immediately on permanent client errors.
+ * to the next key (on auth errors), fail over to the next model (on model/transient/rate-limit errors),
+ * or abort immediately on permanent client payload errors.
  */
 export function classifyGeminiError(err, status = null) {
   const msg = String(err?.message || err || '').toLowerCase();
@@ -99,7 +192,13 @@ export function classifyGeminiError(err, status = null) {
     httpStatus === 403 ||
     msg.includes('api_key_invalid') ||
     msg.includes('api key not valid') ||
-    msg.includes('permission_denied')
+    msg.includes('invalid api key') ||
+    msg.includes('key revoked') ||
+    msg.includes('revoked') ||
+    msg.includes('unauthorized') ||
+    msg.includes('unauthenticated') ||
+    msg.includes('permission_denied') ||
+    (httpStatus === 400 && (msg.includes('api key') || msg.includes('api_key')))
   ) {
     return { category: 'auth_error', retryable: false, status: httpStatus || 401 };
   }
@@ -182,9 +281,16 @@ export class AIProvider {
     return this.getModelChain()[0];
   }
 
+  getApiKeyChain(overrideOptions = {}) {
+    return resolveGeminiApiKeys({
+      ...this.options,
+      ...overrideOptions
+    });
+  }
+
   getApiKey(overrideOptions = {}) {
-    const env = overrideOptions.env || this.options.env || process.env;
-    return overrideOptions.apiKey ?? this.options.apiKey ?? env.GEMINI_API_KEY ?? '';
+    const chain = this.getApiKeyChain(overrideOptions);
+    return chain.length > 0 ? chain[0].key : '';
   }
 
   getRequestTimeoutMs(overrideOptions = {}) {
@@ -215,6 +321,16 @@ export class AIProvider {
       env.GEMINI_RETRY_DELAY_MS;
     const parsed = Number(raw);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : 150;
+  }
+
+  getMaxRetryAfterMs(overrideOptions = {}) {
+    const env = overrideOptions.env || this.options.env || process.env;
+    const raw =
+      overrideOptions.maxRetryAfterMs ??
+      this.options.maxRetryAfterMs ??
+      env.GEMINI_MAX_RETRY_AFTER_MS;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2000;
   }
 
   /**
@@ -314,7 +430,8 @@ export class AIProvider {
    * Executes a single model call against the Gemini generateContent REST API.
    */
   async invokeSingleModel(modelId, systemInstruction, userPrompt, options = {}) {
-    const apiKey = this.getApiKey(options);
+    const allKeys = this.getApiKeyChain(options).map(k => k.key);
+    const apiKey = options.activeApiKey ?? this.getApiKey(options);
     if (!apiKey || !String(apiKey).trim()) {
       const err = new Error('GEMINI_API_KEY is not configured in .env. Please add your key to enable Gemini features.');
       err.category = 'missing_api_key';
@@ -367,7 +484,7 @@ export class AIProvider {
         err?.name === 'AbortError' ||
         String(err?.message || '').toLowerCase().includes('timed out') ||
         String(err?.message || '').toLowerCase().includes('abort');
-      const safeMessage = sanitizeGeminiError(err?.message || 'Network failure', apiKey);
+      const safeMessage = sanitizeGeminiError(err?.message || 'Network failure', [apiKey, ...allKeys]);
       const wrapped = new Error(
         isTimeout
           ? `Model ${modelId} timed out after ${timeoutMs}ms.`
@@ -384,13 +501,17 @@ export class AIProvider {
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       const rawMsg = errData?.error?.message || `HTTP ${res.status}: ${res.statusText || 'Error'}`;
-      const safeMsg = sanitizeGeminiError(rawMsg, apiKey);
+      const safeMsg = sanitizeGeminiError(rawMsg, [apiKey, ...allKeys]);
       const classification = classifyGeminiError({ message: safeMsg, status: res.status }, res.status);
+      const retryAfterMs = parseRetryAfterMs(res.headers);
 
       const httpErr = new Error(`[${modelId}] ${safeMsg}`);
       httpErr.status = res.status;
       httpErr.category = classification.category;
       httpErr.retryable = classification.retryable;
+      if (retryAfterMs !== null) {
+        httpErr.retryAfterMs = retryAfterMs;
+      }
       throw httpErr;
     }
 
@@ -421,9 +542,13 @@ export class AIProvider {
   }
 
   /**
-   * Executes a Gemini generation request across the configured model fallback chain:
-   *   1. gemini-3.8-flash -> 2. gemini-3.6-flash -> 3. gemini-3.5-flash-lite
-   * Preserves the exact systemInstruction and userPrompt across attempts within a bounded deadline.
+   * Executes a Gemini generation request across configured API keys
+   * (GEMINI_API_KEY -> GEMINI_API_KEY_2 -> GEMINI_API_KEY_3) and the ordered model chain
+   * (gemini-3.8-flash -> gemini-3.6-flash -> gemini-3.5-flash-lite):
+   * - Rotates to the next configured key only when a key fails authentication (invalid, revoked, unauthorized).
+   * - Never rotates keys to evade rate limits (429); instead respects Retry-After / bounded backoff and switches models.
+   * - Avoids duplicate (key, model) attempts and never retries keys marked unusable.
+   * - Preserves the exact systemInstruction and userPrompt across all attempts.
    */
   async callGeminiWithFailover(systemInstruction, userPrompt, options = {}) {
     // Support tests that directly monkey-patch `provider.callGemini = async (...) => ...`
@@ -435,18 +560,26 @@ export class AIProvider {
         model: primary,
         primaryModel: primary,
         fallbackUsed: false,
+        modelFallbackUsed: false,
+        keyFallbackUsed: false,
+        activeKeySlot: 'GEMINI_API_KEY',
         attempts: 1,
-        triedModels: [primary]
+        triedModels: [primary],
+        triedKeySlots: ['GEMINI_API_KEY'],
+        backoffDelaysMs: []
       };
     }
 
-    const apiKey = this.getApiKey(options);
-    if (!apiKey || !String(apiKey).trim()) {
+    const keyChain = this.getApiKeyChain(options);
+    const allRawKeys = keyChain.map(k => k.key);
+
+    if (keyChain.length === 0) {
       const err = new Error('GEMINI_API_KEY is not configured in .env. Please add your key to enable Gemini features.');
       err.category = 'missing_api_key';
       err.retryable = false;
       err.attempts = 0;
       err.triedModels = [];
+      err.triedKeySlots = [];
       throw err;
     }
 
@@ -456,6 +589,7 @@ export class AIProvider {
       err.retryable = false;
       err.attempts = 0;
       err.triedModels = [];
+      err.triedKeySlots = [];
       throw err;
     }
 
@@ -463,29 +597,61 @@ export class AIProvider {
     const overallDeadlineMs = this.getOverallDeadlineMs(options);
     const perAttemptTimeoutMs = this.getRequestTimeoutMs(options);
     const retryDelayMs = this.getRetryDelayMs(options);
+    const maxRetryAfterMs = this.getMaxRetryAfterMs(options);
     const startTime = Date.now();
 
+    const unusableKeyIndices = new Set();
+    const unavailableModelIndices = new Set();
+    const triedCombinations = new Set();
+
     const triedModels = [];
+    const triedKeySlots = [];
+    const backoffDelaysMs = [];
     const attemptErrors = [];
     let lastClassification = { category: 'provider_error', retryable: false };
 
-    for (let i = 0; i < modelChain.length; i++) {
-      const modelId = modelChain[i];
+    let keyIndex = 0;
+    let modelIndex = 0;
+
+    while (keyIndex < keyChain.length && modelIndex < modelChain.length) {
+      if (unusableKeyIndices.has(keyIndex)) {
+        keyIndex += 1;
+        continue;
+      }
+      if (unavailableModelIndices.has(modelIndex)) {
+        modelIndex += 1;
+        continue;
+      }
+
+      const keyEntry = keyChain[keyIndex];
+      const modelId = modelChain[modelIndex];
+      const comboId = `${keyEntry.slot}::${modelId}`;
+
+      if (triedCombinations.has(comboId)) {
+        modelIndex += 1;
+        continue;
+      }
+
       const elapsed = Date.now() - startTime;
       const remainingMs = overallDeadlineMs - elapsed;
 
-      if (i > 0 && remainingMs <= 100) {
+      if (triedModels.length > 0 && remainingMs <= 100) {
         lastClassification = { category: 'timeout', retryable: false };
         attemptErrors.push(`Overall deadline (${overallDeadlineMs}ms) reached before trying ${modelId}`);
         break;
       }
 
       const attemptTimeout = Math.max(Math.min(perAttemptTimeoutMs, remainingMs), 150);
+      triedCombinations.add(comboId);
       triedModels.push(modelId);
+      if (!triedKeySlots.includes(keyEntry.slot)) {
+        triedKeySlots.push(keyEntry.slot);
+      }
 
       try {
         const text = await this.invokeSingleModel(modelId, systemInstruction, userPrompt, {
           ...options,
+          activeApiKey: keyEntry.key,
           timeoutMs: attemptTimeout
         });
 
@@ -493,44 +659,110 @@ export class AIProvider {
           text,
           model: modelId,
           primaryModel: modelChain[0],
-          fallbackUsed: i > 0,
+          fallbackUsed: triedModels.length > 1,
+          modelFallbackUsed: modelIndex > 0,
+          keyFallbackUsed: keyIndex > 0,
+          activeKeySlot: keyEntry.slot,
           attempts: triedModels.length,
-          triedModels
+          triedModels,
+          triedKeySlots,
+          backoffDelaysMs
         };
       } catch (err) {
-        const safeMsg = sanitizeGeminiError(err?.message || 'Model call failed', apiKey);
+        const safeMsg = sanitizeGeminiError(err?.message || 'Model call failed', allRawKeys);
         const classification = classifyGeminiError(err, err?.status);
         lastClassification = classification;
-        attemptErrors.push(`${modelId} (${classification.category}): ${safeMsg}`);
+        attemptErrors.push(`${modelId} [${keyEntry.slot}] (${classification.category}): ${safeMsg}`);
 
-        // Do not retry permanent errors (e.g. invalid API key, non-model 400 Bad Request)
+        // 1. Authentication / Invalid or Revoked Key Error -> mark key unusable and rotate to next key
+        if (classification.category === 'auth_error') {
+          unusableKeyIndices.add(keyIndex);
+
+          let nextKeyIndex = keyIndex + 1;
+          while (nextKeyIndex < keyChain.length && unusableKeyIndices.has(nextKeyIndex)) {
+            nextKeyIndex += 1;
+          }
+
+          if (nextKeyIndex < keyChain.length) {
+            keyIndex = nextKeyIndex;
+            // Keep current modelIndex unless already attempted with this new key
+            continue;
+          }
+
+          // All configured keys are invalid/unusable -> abort immediately without retrying models
+          const authErr = new Error(
+            keyChain.length > 1
+              ? `All ${keyChain.length} configured Gemini API keys failed authentication. Last error: ${safeMsg}`
+              : safeMsg
+          );
+          authErr.category = 'auth_error';
+          authErr.retryable = false;
+          authErr.attempts = triedModels.length;
+          authErr.triedModels = triedModels;
+          authErr.triedKeySlots = triedKeySlots;
+          authErr.backoffDelaysMs = backoffDelaysMs;
+          throw authErr;
+        }
+
+        // 2. Permanent non-model client request error -> abort immediately
         if (!classification.retryable) {
           const permErr = new Error(safeMsg);
           permErr.category = classification.category;
           permErr.retryable = false;
           permErr.attempts = triedModels.length;
           permErr.triedModels = triedModels;
+          permErr.triedKeySlots = triedKeySlots;
+          permErr.backoffDelaysMs = backoffDelaysMs;
           throw permErr;
         }
 
-        // Wait a short bounded delay before trying the next fallback model
-        const hasNextModel = i < modelChain.length - 1;
-        if (hasNextModel && retryDelayMs > 0 && Date.now() - startTime + retryDelayMs < overallDeadlineMs) {
-          await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+        // 3. Model unavailable -> mark model unavailable for any subsequent key/model attempts
+        if (classification.category === 'model_unavailable') {
+          unavailableModelIndices.add(modelIndex);
         }
+
+        // 4. Rate limit (429) or transient model/server/network error:
+        //    Do NOT rotate keys on 429; respect Retry-After or bounded exponential backoff and switch models.
+        let nextModelIndex = modelIndex + 1;
+        while (nextModelIndex < modelChain.length && unavailableModelIndices.has(nextModelIndex)) {
+          nextModelIndex += 1;
+        }
+
+        const hasNextModel = nextModelIndex < modelChain.length;
+        if (hasNextModel) {
+          let delayMs = retryDelayMs;
+          if (classification.category === 'rate_limit') {
+            if (Number.isFinite(err?.retryAfterMs) && err.retryAfterMs >= 0) {
+              delayMs = Math.min(err.retryAfterMs, maxRetryAfterMs);
+            } else {
+              delayMs = Math.min(retryDelayMs * Math.pow(2, modelIndex), maxRetryAfterMs);
+            }
+          }
+
+          if (delayMs >= 0 && Date.now() - startTime + delayMs < overallDeadlineMs) {
+            backoffDelaysMs.push(delayMs);
+            if (delayMs > 0) {
+              await new Promise(resolve => setTimeout(resolve, delayMs));
+            }
+          }
+        }
+
+        modelIndex = nextModelIndex;
       }
     }
 
     const summaryError = new Error(
       sanitizeGeminiError(
         `All configured Gemini models failed (${triedModels.join(' -> ')}). Details: ${attemptErrors.join(' | ')}`,
-        apiKey
+        allRawKeys
       )
     );
     summaryError.category = lastClassification.category || 'all_models_failed';
     summaryError.retryable = false;
     summaryError.attempts = triedModels.length;
     summaryError.triedModels = triedModels;
+    summaryError.triedKeySlots = triedKeySlots;
+    summaryError.backoffDelaysMs = backoffDelaysMs;
     throw summaryError;
   }
 
@@ -546,6 +778,7 @@ export class AIProvider {
    * Generates a deep architectural summary grounded strictly in the repo context
    */
   async generateArchitectureSummary(analysis, options = {}) {
+    const allRawKeys = this.getApiKeyChain(options).map(k => k.key);
     try {
       const context = this.buildCompactContext(analysis);
       const repoName = analysis?.repository?.fullName || 'Unknown Repository';
@@ -578,11 +811,16 @@ Please generate the architectural summary following the grounding rules.`;
         model: result.model,
         primaryModel: result.primaryModel,
         fallbackUsed: result.fallbackUsed,
+        modelFallbackUsed: result.modelFallbackUsed,
+        keyFallbackUsed: result.keyFallbackUsed,
+        activeKeySlot: result.activeKeySlot,
         attempts: result.attempts,
-        triedModels: result.triedModels
+        triedModels: result.triedModels,
+        triedKeySlots: result.triedKeySlots,
+        backoffDelaysMs: result.backoffDelaysMs
       };
     } catch (err) {
-      const safeMsg = sanitizeGeminiError(err.message, this.getApiKey(options));
+      const safeMsg = sanitizeGeminiError(err.message, allRawKeys);
       console.error('[DevLens AI] Gemini summary error:', safeMsg);
       return {
         available: false,
@@ -590,6 +828,8 @@ Please generate the architectural summary following the grounding rules.`;
         errorCategory: err.category || 'provider_error',
         attempts: err.attempts || 0,
         triedModels: err.triedModels || [],
+        triedKeySlots: err.triedKeySlots || [],
+        backoffDelaysMs: err.backoffDelaysMs || [],
         fallbackUsed: (err.attempts || 0) > 1,
         summary: null
       };
@@ -637,6 +877,7 @@ Please provide an evidence-grounded answer following the strict grounding rules.
    * and Neo4j Project Memory graph when available.
    */
   async answerQuestion(question, analysis, options = {}) {
+    const allRawKeys = this.getApiKeyChain(options).map(k => k.key);
     try {
       let graphContext = options.graphContext || null;
       if (!graphContext && !options.skipGraphRetrieval && analysis?.repository?.fullName) {
@@ -677,8 +918,13 @@ STRICT GROUNDING & INVESTIGATION RULES:
         model: result.model,
         primaryModel: result.primaryModel,
         fallbackUsed: result.fallbackUsed,
+        modelFallbackUsed: result.modelFallbackUsed,
+        keyFallbackUsed: result.keyFallbackUsed,
+        activeKeySlot: result.activeKeySlot,
         attempts: result.attempts,
         triedModels: result.triedModels,
+        triedKeySlots: result.triedKeySlots,
+        backoffDelaysMs: result.backoffDelaysMs,
         graphMemory: {
           used: Boolean(graphContext?.available && graphContext?.hasEvidence),
           status: graphContext?.status || 'unconfigured',
@@ -696,7 +942,7 @@ STRICT GROUNDING & INVESTIGATION RULES:
         }
       };
     } catch (err) {
-      const safeMsg = sanitizeGeminiError(err.message, this.getApiKey(options));
+      const safeMsg = sanitizeGeminiError(err.message, allRawKeys);
       console.error('[DevLens AI] Gemini Q&A error:', safeMsg);
       return {
         available: false,
@@ -704,6 +950,8 @@ STRICT GROUNDING & INVESTIGATION RULES:
         errorCategory: err.category || 'provider_error',
         attempts: err.attempts || 0,
         triedModels: err.triedModels || [],
+        triedKeySlots: err.triedKeySlots || [],
+        backoffDelaysMs: err.backoffDelaysMs || [],
         fallbackUsed: (err.attempts || 0) > 1,
         answer: null
       };

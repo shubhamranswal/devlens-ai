@@ -27,6 +27,8 @@ import {
   aiProvider,
   DEFAULT_GEMINI_MODEL_CHAIN,
   resolveGeminiModelChain,
+  resolveGeminiApiKeys,
+  parseRetryAfterMs,
   classifyGeminiError,
   sanitizeGeminiError
 } from '../server/ai/provider.js';
@@ -1268,4 +1270,310 @@ describe('Priority 6: Gemini Multi-Model Failover Engine (12-Case Verification S
     assert.equal(failedRes.error.includes(secretKey), false, 'Returned error must never contain the raw API key');
   });
 });
+
+describe('Gemini API-Key Failover & Combined Key+Model Failover Suite', () => {
+  it('1. Primary key succeeds without failover', async () => {
+    const usedKeys = [];
+    const provider = new AIProvider({
+      env: {
+        GEMINI_API_KEY: 'key-primary-valid',
+        GEMINI_API_KEY_2: 'key-secondary-valid',
+        GEMINI_API_KEY_3: 'key-tertiary-valid'
+      },
+      retryDelayMs: 0,
+      fetchImpl: async (url) => {
+        const keyParam = new URL(url).searchParams.get('key');
+        usedKeys.push(keyParam);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [{ content: { parts: [{ text: 'Primary key succeeded on attempt 1' }] } }]
+          })
+        };
+      }
+    });
+
+    const res = await provider.generateArchitectureSummary(SAMPLE_ANALYSIS);
+    assert.equal(res.available, true);
+    assert.equal(res.keyFallbackUsed, false);
+    assert.equal(res.modelFallbackUsed, false);
+    assert.equal(res.activeKeySlot, 'GEMINI_API_KEY');
+    assert.equal(res.attempts, 1);
+    assert.deepEqual(usedKeys, ['key-primary-valid']);
+  });
+
+  it('2. Primary key is invalid (401/403) and secondary key (GEMINI_API_KEY_2) succeeds', async () => {
+    const attemptsLog = [];
+    const provider = new AIProvider({
+      env: {
+        GEMINI_API_KEY: 'key-primary-invalid',
+        GEMINI_API_KEY_2: 'key-secondary-valid',
+        GEMINI_API_KEY_3: 'key-tertiary-valid'
+      },
+      retryDelayMs: 0,
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        const keyParam = parsed.searchParams.get('key');
+        const modelId = url.match(/models\/([^:]+):generateContent/)[1];
+        attemptsLog.push({ key: keyParam, model: modelId });
+
+        if (keyParam === 'key-primary-invalid') {
+          return {
+            ok: false,
+            status: 403,
+            json: async () => ({ error: { message: 'API key not valid. Please pass a valid API key.' } })
+          };
+        }
+
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [{ content: { parts: [{ text: 'Secondary key succeeded on primary model' }] } }]
+          })
+        };
+      }
+    });
+
+    const res = await provider.generateArchitectureSummary(SAMPLE_ANALYSIS);
+    assert.equal(res.available, true);
+    assert.equal(res.keyFallbackUsed, true);
+    assert.equal(res.modelFallbackUsed, false);
+    assert.equal(res.activeKeySlot, 'GEMINI_API_KEY_2');
+    assert.equal(res.model, 'gemini-3.8-flash');
+    assert.equal(res.attempts, 2);
+    assert.deepEqual(attemptsLog, [
+      { key: 'key-primary-invalid', model: 'gemini-3.8-flash' },
+      { key: 'key-secondary-valid', model: 'gemini-3.8-flash' }
+    ]);
+  });
+
+  it('3. First key fails authentication, blank/duplicate keys are skipped, and next eligible key (GEMINI_API_KEY_3) is tried', async () => {
+    const attemptsLog = [];
+    const provider = new AIProvider({
+      env: {
+        GEMINI_API_KEY: 'revoked-key-1',
+        GEMINI_API_KEY_2: '   ', // Blank key -> ignored
+        GEMINI_API_KEY_3: 'working-key-3'
+      },
+      retryDelayMs: 0,
+      fetchImpl: async (url) => {
+        const keyParam = new URL(url).searchParams.get('key');
+        const modelId = url.match(/models\/([^:]+):generateContent/)[1];
+        attemptsLog.push({ key: keyParam, model: modelId });
+
+        if (keyParam === 'revoked-key-1') {
+          return {
+            ok: false,
+            status: 401,
+            json: async () => ({ error: { message: 'Request had invalid authentication credentials (key revoked).' } })
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [{ content: { parts: [{ text: 'Tertiary key succeeded' }] } }]
+          })
+        };
+      }
+    });
+
+    const res = await provider.generateArchitectureSummary(SAMPLE_ANALYSIS);
+    assert.equal(res.available, true);
+    assert.equal(res.keyFallbackUsed, true);
+    assert.equal(res.activeKeySlot, 'GEMINI_API_KEY_3');
+    assert.deepEqual(res.triedKeySlots, ['GEMINI_API_KEY', 'GEMINI_API_KEY_3']);
+    assert.deepEqual(attemptsLog, [
+      { key: 'revoked-key-1', model: 'gemini-3.8-flash' },
+      { key: 'working-key-3', model: 'gemini-3.8-flash' }
+    ]);
+  });
+
+  it('4. Combined key and model failover never repeats identical attempts or re-uses keys marked unusable', async () => {
+    // Scenario:
+    // - Attempt 1: (key_1, gemini-3.8-flash) -> 404 model unavailable (marks gemini-3.8-flash unavailable)
+    // - Attempt 2: (key_1, gemini-3.6-flash) -> 403 key_1 unauthorized (marks key_1 unusable, rotates to key_2 on gemini-3.6-flash)
+    // - Attempt 3: (key_2, gemini-3.6-flash) -> 503 server error (advances to gemini-3.5-flash-lite on key_2)
+    // - Attempt 4: (key_2, gemini-3.5-flash-lite) -> 200 OK
+    const attemptsLog = [];
+    const provider = new AIProvider({
+      env: {
+        GEMINI_API_KEY: 'key-1-expires',
+        GEMINI_API_KEY_2: 'key-2-good',
+        GEMINI_API_KEY_3: 'key-3-unused'
+      },
+      retryDelayMs: 0,
+      fetchImpl: async (url) => {
+        const keyParam = new URL(url).searchParams.get('key');
+        const modelId = url.match(/models\/([^:]+):generateContent/)[1];
+        attemptsLog.push(`${keyParam}::${modelId}`);
+
+        if (modelId === 'gemini-3.8-flash') {
+          return {
+            ok: false,
+            status: 404,
+            json: async () => ({ error: { message: 'Model gemini-3.8-flash not found' } })
+          };
+        }
+        if (keyParam === 'key-1-expires' && modelId === 'gemini-3.6-flash') {
+          return {
+            ok: false,
+            status: 403,
+            json: async () => ({ error: { message: 'API_KEY_INVALID: key-1-expires is revoked' } })
+          };
+        }
+        if (keyParam === 'key-2-good' && modelId === 'gemini-3.6-flash') {
+          return {
+            ok: false,
+            status: 503,
+            json: async () => ({ error: { message: 'Temporary 503 overload on gemini-3.6-flash' } })
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [{ content: { parts: [{ text: 'Combined failover succeeded on key_2 + gemini-3.5-flash-lite' }] } }]
+          })
+        };
+      }
+    });
+
+    const res = await provider.generateArchitectureSummary(SAMPLE_ANALYSIS);
+    assert.equal(res.available, true);
+    assert.equal(res.model, 'gemini-3.5-flash-lite');
+    assert.equal(res.activeKeySlot, 'GEMINI_API_KEY_2');
+    assert.equal(res.keyFallbackUsed, true);
+    assert.equal(res.modelFallbackUsed, true);
+    assert.equal(res.attempts, 4);
+
+    // Verify no duplicate (key, model) combinations and key-1 is never used after failing auth
+    const uniqueAttempts = new Set(attemptsLog);
+    assert.equal(uniqueAttempts.size, attemptsLog.length, 'Must not repeat any (key, model) combination');
+    assert.deepEqual(attemptsLog, [
+      'key-1-expires::gemini-3.8-flash',
+      'key-1-expires::gemini-3.6-flash',
+      'key-2-good::gemini-3.6-flash',
+      'key-2-good::gemini-3.5-flash-lite'
+    ]);
+  });
+
+  it('5. Duplicate and blank keys are ignored by resolveGeminiApiKeys', () => {
+    const resolved = resolveGeminiApiKeys({
+      env: {
+        GEMINI_API_KEY: '  same-secret-key  ',
+        GEMINI_API_KEY_2: 'same-secret-key',
+        GEMINI_API_KEY_3: '   '
+      }
+    });
+    assert.equal(resolved.length, 1);
+    assert.equal(resolved[0].slot, 'GEMINI_API_KEY');
+    assert.equal(resolved[0].key, 'same-secret-key');
+  });
+
+  it('6. Rate-limit errors (429) respect Retry-After, use bounded backoff, switch models, and do NOT rotate keys', async () => {
+    assert.equal(parseRetryAfterMs({ 'retry-after': '1' }), 1000);
+    assert.equal(parseRetryAfterMs({ 'Retry-After': '0.05' }), 50);
+
+    const attemptsLog = [];
+    const provider = new AIProvider({
+      env: {
+        GEMINI_API_KEY: 'primary-rate-limited-key',
+        GEMINI_API_KEY_2: 'secondary-key-must-not-be-used-on-429'
+      },
+      retryDelayMs: 20,
+      maxRetryAfterMs: 60,
+      fetchImpl: async (url) => {
+        const keyParam = new URL(url).searchParams.get('key');
+        const modelId = url.match(/models\/([^:]+):generateContent/)[1];
+        attemptsLog.push({ key: keyParam, model: modelId });
+
+        if (modelId === 'gemini-3.8-flash') {
+          return {
+            ok: false,
+            status: 429,
+            headers: new Map([['retry-after', '0.04']]),
+            json: async () => ({ error: { message: 'Resource has been exhausted (rate limit).' } })
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [{ content: { parts: [{ text: 'Succeeded on secondary model with primary key after Retry-After' }] } }]
+          })
+        };
+      }
+    });
+
+    const res = await provider.generateArchitectureSummary(SAMPLE_ANALYSIS);
+    assert.equal(res.available, true);
+    assert.equal(res.model, 'gemini-3.6-flash');
+    assert.equal(res.keyFallbackUsed, false, 'Must NOT rotate keys to evade 429 rate limits');
+    assert.equal(res.activeKeySlot, 'GEMINI_API_KEY');
+    assert.deepEqual(attemptsLog, [
+      { key: 'primary-rate-limited-key', model: 'gemini-3.8-flash' },
+      { key: 'primary-rate-limited-key', model: 'gemini-3.6-flash' }
+    ]);
+    assert.deepEqual(res.backoffDelaysMs, [40]);
+  });
+
+  it('7. All configured keys fail authentication -> returns safe structured error without exposing any key values or retrying extra models', async () => {
+    const k1 = 'AIzaSyInvalidKeyOne1111111111';
+    const k2 = 'AIzaSyInvalidKeyTwo2222222222';
+    const k3 = 'AIzaSyInvalidKeyThree33333333';
+    const attemptsLog = [];
+
+    const provider = new AIProvider({
+      env: {
+        GEMINI_API_KEY: k1,
+        GEMINI_API_KEY_2: k2,
+        GEMINI_API_KEY_3: k3
+      },
+      retryDelayMs: 0,
+      fetchImpl: async (url) => {
+        const keyParam = new URL(url).searchParams.get('key');
+        const modelId = url.match(/models\/([^:]+):generateContent/)[1];
+        attemptsLog.push({ key: keyParam, model: modelId });
+        return {
+          ok: false,
+          status: 401,
+          json: async () => ({
+            error: { message: `Invalid authentication credentials for key ${keyParam} at ${url}` }
+          })
+        };
+      }
+    });
+
+    let neo4jRetrievalCalls = 0;
+    const qaRes = await provider.answerQuestion(
+      'How does auth work?',
+      SAMPLE_ANALYSIS,
+      {
+        graphContext: {
+          get available() {
+            neo4jRetrievalCalls += 1;
+            return true;
+          },
+          hasEvidence: false
+        }
+      }
+    );
+
+    assert.equal(qaRes.available, false);
+    assert.equal(qaRes.errorCategory, 'auth_error');
+    assert.equal(qaRes.attempts, 3);
+    assert.deepEqual(qaRes.triedKeySlots, ['GEMINI_API_KEY', 'GEMINI_API_KEY_2', 'GEMINI_API_KEY_3']);
+    // Must only try each invalid key once on the primary model and stop immediately when all 3 keys fail auth
+    assert.equal(attemptsLog.length, 3);
+    // Verify none of the 3 secrets appear in the error message or response object
+    const serialized = JSON.stringify(qaRes);
+    assert.equal(serialized.includes(k1), false);
+    assert.equal(serialized.includes(k2), false);
+    assert.equal(serialized.includes(k3), false);
+  });
+});
+
 

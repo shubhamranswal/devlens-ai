@@ -213,7 +213,9 @@ This runs the Express API on port 5000 and the Vite development server on port 3
 
 | Variable | Required | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `GEMINI_API_KEY` | Yes (for AI) | None | Google Gemini API key used for architectural summaries and Q&A. |
+| `GEMINI_API_KEY` | Yes (for AI) | None | Primary Google Gemini API key used for architectural summaries and Q&A. |
+| `GEMINI_API_KEY_2` | No | None | Optional secondary Gemini API key for automatic auth/key failover. |
+| `GEMINI_API_KEY_3` | No | None | Optional tertiary Gemini API key for automatic auth/key failover. |
 | `GEMINI_MODEL_CHAIN` | No | `gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite` | Comma-separated ordered fallback chain of text-generation Gemini models. |
 | `GEMINI_MODEL` | No | None | Optional primary Gemini model override (prepended to the failover chain). |
 | `GEMINI_REQUEST_TIMEOUT_MS` | No | `12000` | Per-attempt timeout in milliseconds before failing over to the next Gemini model. |
